@@ -441,11 +441,18 @@ class AutofillInfo {
 
 /// The current text and selection state of a text field.
 class EditingState {
-  EditingState({this.text, int? baseOffset, int? extentOffset}) :
-    // Don't allow negative numbers. Pick the smallest selection index for base.
-    baseOffset = math.max(0, math.min(baseOffset ?? 0, extentOffset ?? 0)),
-    // Don't allow negative numbers. Pick the greatest selection index for extent.
-    extentOffset = math.max(0, math.max(baseOffset ?? 0, extentOffset ?? 0));
+  EditingState(
+      {this.text,
+      int? baseOffset,
+      int? extentOffset,
+      this.composingBase=-1,
+      this.composingExtent=-1})
+      :
+        // Don't allow negative numbers. Pick the smallest selection index for base.
+        baseOffset = math.max(0, math.min(baseOffset ?? 0, extentOffset ?? 0)),
+        // Don't allow negative numbers. Pick the greatest selection index for extent.
+        extentOffset =
+            math.max(0, math.max(baseOffset ?? 0, extentOffset ?? 0));
 
   /// Creates an [EditingState] instance using values from an editing state Map
   /// coming from Flutter.
@@ -502,6 +509,22 @@ class EditingState {
     }
   }
 
+  EditingState copyWith({
+    String? text,
+    int? baseOffset,
+    int? extentOffset,
+    int? composingBase,
+    int? composingExtent,
+  }) {
+    return EditingState(
+      text: text ?? this.text,
+      baseOffset: baseOffset ?? this.baseOffset,
+      extentOffset: extentOffset ?? this.extentOffset,
+      composingBase: composingBase ?? this.composingBase,
+      composingExtent: composingExtent ?? this.composingExtent,
+    );
+  }
+
   /// The counterpart of [EditingState.fromFrameworkMessage]. It generates a Map that
   /// can be sent to Flutter.
   // TODO(mdebbar): Should we get `selectionAffinity` and other properties from flutter's editing state?
@@ -509,6 +532,8 @@ class EditingState {
         'text': text,
         'selectionBase': baseOffset,
         'selectionExtent': extentOffset,
+        'composingBase': composingBase ?? -1,
+        'composingExtent': composingExtent ?? -1,
       };
 
   /// The current text being edited.
@@ -520,11 +545,18 @@ class EditingState {
   /// The offset at which the text selection terminates.
   final int? extentOffset;
 
+  /// The start range of text that is still being composed.
+  final int? composingBase;
+
+  /// The end range of text that is still being composed.
+  final int? composingExtent;
+
   /// Whether the current editing state is valid or not.
   bool get isValid => baseOffset! >= 0 && extentOffset! >= 0;
 
   @override
-  int get hashCode => ui.hashValues(text, baseOffset, extentOffset);
+  int get hashCode => ui.hashValues(
+      text, baseOffset, extentOffset, composingBase, composingExtent);
 
   @override
   bool operator ==(Object other) {
@@ -537,13 +569,15 @@ class EditingState {
     return other is EditingState &&
         other.text == text &&
         other.baseOffset == baseOffset &&
-        other.extentOffset == extentOffset;
+        other.extentOffset == extentOffset &&
+        other.composingBase == composingBase &&
+        other.composingExtent == composingExtent;
   }
 
   @override
   String toString() {
     return assertionsEnabled
-        ? 'EditingState("$text", base:$baseOffset, extent:$extentOffset)'
+        ? 'EditingState("$text", base:$baseOffset, extent:$extentOffset, composingBase:$composingBase, composingExtent:$composingExtent)'
         : super.toString();
   }
 
@@ -834,6 +868,11 @@ abstract class DefaultTextEditingStrategy implements TextEditingStrategy {
   /// The DOM element used for editing, if any.
   html.HtmlElement? domElement;
 
+  /// Events used to track composed (IME) input
+  html.EventListener? compositionStart;
+  html.EventListener? compositionUpdate;
+  html.EventListener? compositionEnd;
+
   /// Same as [domElement] but null-checked.
   ///
   /// This must only be called in places that know for sure that a DOM element
@@ -866,6 +905,8 @@ abstract class DefaultTextEditingStrategy implements TextEditingStrategy {
   /// Whether the focused input element is part of a form.
   bool get appendedToForm => _appendedToForm;
   bool _appendedToForm = false;
+
+  String? composingText;
 
   html.FormElement? get focusedFormElement =>
       inputConfiguration.autofillGroup?.formElement;
@@ -942,9 +983,7 @@ abstract class DefaultTextEditingStrategy implements TextEditingStrategy {
 
     // Subscribe to text and selection changes.
     subscriptions.add(activeDomElement.onInput.listen(handleChange));
-
     subscriptions.add(activeDomElement.onKeyDown.listen(maybeSendAction));
-
     subscriptions.add(html.document.onSelectionChange.listen(handleChange));
 
     // Refocus on the activeDomElement after blur, so that user can keep editing the
@@ -953,7 +992,18 @@ abstract class DefaultTextEditingStrategy implements TextEditingStrategy {
       activeDomElement.focus();
     }));
 
+    addCompositionHandlers();
     preventDefaultForMouseEvents();
+  }
+
+  void addCompositionHandlers() {
+    compositionStart = _handleCompositionStart;
+    compositionUpdate = _handleCompositionChange;
+    compositionEnd = _handleCompositionEnd;
+
+    activeDomElement.addEventListener('compositionstart', compositionStart);
+    activeDomElement.addEventListener('compositionupdate', compositionUpdate);
+    activeDomElement.addEventListener('compositionend', compositionEnd);
   }
 
   @override
@@ -985,6 +1035,9 @@ abstract class DefaultTextEditingStrategy implements TextEditingStrategy {
       subscriptions[i].cancel();
     }
     subscriptions.clear();
+
+    removeCompositionHandlers();
+
     // If focused element is a part of a form, it needs to stay on the DOM
     // until the autofill context of the form is finalized.
     // More details on `TextInput.finishAutofillContext` call.
@@ -998,6 +1051,12 @@ abstract class DefaultTextEditingStrategy implements TextEditingStrategy {
       activeDomElement.remove();
     }
     domElement = null;
+  }
+
+  void removeCompositionHandlers() {
+    activeDomElement.removeEventListener('compositionstart', compositionStart);
+    activeDomElement.removeEventListener('compositionupdate', compositionUpdate);
+    activeDomElement.removeEventListener('compositionend', compositionEnd);
   }
 
   @override
@@ -1021,9 +1080,39 @@ abstract class DefaultTextEditingStrategy implements TextEditingStrategy {
   void handleChange(html.Event event) {
     assert(isEnabled);
 
-    final EditingState newEditingState = EditingState.fromDomElement(activeDomElement);
+    EditingState newEditingState = EditingState.fromDomElement(activeDomElement);
+    if (composingText != null && newEditingState.text != null) {
+      final int compositionExtent = newEditingState.baseOffset ?? 0;
+      final int compositionBase = compositionExtent - (composingText?.length ?? 0);
+      if (compositionBase >= 0) {
+        newEditingState = newEditingState.copyWith(
+            composingBase: compositionBase,
+            composingExtent: compositionBase + composingText!.length);
+      }
+    }
 
     if (newEditingState != lastEditingState) {
+      lastEditingState = newEditingState;
+      onChange!(lastEditingState);
+    }
+  }
+
+  void _handleCompositionStart(html.Event event) {
+    if (event is html.CompositionEvent) {
+      composingText = null;
+    }
+  }
+
+  void _handleCompositionChange(html.Event event) {
+    if (event is html.CompositionEvent) {
+      composingText = event.data;
+    }
+  }
+
+  void _handleCompositionEnd(html.Event event) {
+    if (event is html.CompositionEvent) {
+      composingText = null;
+      final EditingState newEditingState = EditingState.fromDomElement(activeDomElement);
       lastEditingState = newEditingState;
       onChange!(lastEditingState);
     }
@@ -1164,9 +1253,7 @@ class IOSTextEditingStrategy extends GloballyPositionedTextEditingStrategy {
 
     // Subscribe to text and selection changes.
     subscriptions.add(activeDomElement.onInput.listen(handleChange));
-
     subscriptions.add(activeDomElement.onKeyDown.listen(maybeSendAction));
-
     subscriptions.add(html.document.onSelectionChange.listen(handleChange));
 
     // Position the DOM element after it is focused.
@@ -1195,6 +1282,8 @@ class IOSTextEditingStrategy extends GloballyPositionedTextEditingStrategy {
         owner.sendTextConnectionClosedToFrameworkIfAny();
       }
     }));
+
+    addCompositionHandlers();
   }
 
   @override
@@ -1295,9 +1384,7 @@ class AndroidTextEditingStrategy extends GloballyPositionedTextEditingStrategy {
 
     // Subscribe to text and selection changes.
     subscriptions.add(activeDomElement.onInput.listen(handleChange));
-
     subscriptions.add(activeDomElement.onKeyDown.listen(maybeSendAction));
-
     subscriptions.add(html.document.onSelectionChange.listen(handleChange));
 
     subscriptions.add(activeDomElement.onBlur.listen((_) {
@@ -1311,6 +1398,8 @@ class AndroidTextEditingStrategy extends GloballyPositionedTextEditingStrategy {
         owner.sendTextConnectionClosedToFrameworkIfAny();
       }
     }));
+
+    addCompositionHandlers();
   }
 
   @override
@@ -1349,7 +1438,6 @@ class FirefoxTextEditingStrategy extends GloballyPositionedTextEditingStrategy {
 
     // Subscribe to text and selection changes.
     subscriptions.add(activeDomElement.onInput.listen(handleChange));
-
     subscriptions.add(activeDomElement.onKeyDown.listen(maybeSendAction));
 
     // Detects changes in text selection.
@@ -1380,6 +1468,7 @@ class FirefoxTextEditingStrategy extends GloballyPositionedTextEditingStrategy {
       _postponeFocus();
     }));
 
+    addCompositionHandlers();
     preventDefaultForMouseEvents();
   }
 

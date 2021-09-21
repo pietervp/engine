@@ -1462,7 +1462,9 @@ void testMain() {
           <String, dynamic>{
             'text': 'something',
             'selectionBase': 9,
-            'selectionExtent': 9
+            'selectionExtent': 9,
+            'composingBase': -1,
+            'composingExtent': -1
           }
         ],
       );
@@ -1486,7 +1488,76 @@ void testMain() {
           <String, dynamic>{
             'text': 'something',
             'selectionBase': 2,
-            'selectionExtent': 5
+            'selectionExtent': 5,
+            'composingBase': -1,
+            'composingExtent': -1
+          }
+        ],
+      );
+      spy.messages.clear();
+
+      hideKeyboard();
+    });
+
+    test('Syncs composing info in the editing state back to Flutter', () {
+      final MethodCall setClient = MethodCall(
+          'TextInput.setClient', <dynamic>[123, flutterSinglelineConfig]);
+      sendFrameworkMessage(codec.encodeMethodCall(setClient));
+
+      const MethodCall setEditingState =
+      MethodCall('TextInput.setEditingState', <String, dynamic>{
+        'text': 'abcd',
+        'selectionBase': 2,
+        'selectionExtent': 3,
+      });
+      sendFrameworkMessage(codec.encodeMethodCall(setEditingState));
+
+      const MethodCall show = MethodCall('TextInput.show');
+      sendFrameworkMessage(codec.encodeMethodCall(show));
+
+      final InputElement input = textEditing!.strategy.domElement! as InputElement;
+
+      input.value = 'something';
+      input.dispatchEvent(Event.eventType('Event', 'input'));
+
+      expect(spy.messages, hasLength(1));
+      expect(spy.messages[0].channel, 'flutter/textinput');
+      expect(spy.messages[0].methodName, 'TextInputClient.updateEditingState');
+      expect(
+        spy.messages[0].methodArguments,
+        <dynamic>[
+          123, // Client ID
+          <String, dynamic>{
+            'text': 'something',
+            'selectionBase': 9,
+            'selectionExtent': 9,
+            'composingBase': -1,
+            'composingExtent': -1
+          }
+        ],
+      );
+      spy.messages.clear();
+
+      CompositionEvent startEvent = CompositionEvent('compositionstart', data:'');
+      input.dispatchEvent(startEvent);
+      CompositionEvent updateEvent = CompositionEvent('compositionupdate', data:'1');
+      input.value = 'something1';
+      input.dispatchEvent(updateEvent);
+      input.dispatchEvent(Event.eventType('Event', 'input'));
+
+      expect(spy.messages, hasLength(1));
+      expect(spy.messages[0].channel, 'flutter/textinput');
+      expect(spy.messages[0].methodName, 'TextInputClient.updateEditingState');
+      expect(
+        spy.messages[0].methodArguments,
+        <dynamic>[
+          123, // Client ID
+          <String, dynamic>{
+            'text': 'something1',
+            'selectionBase': 10,
+            'selectionExtent': 10,
+            'composingBase': 9,
+            'composingExtent': 10
           }
         ],
       );
@@ -1563,7 +1634,9 @@ void testMain() {
             hintForFirstElement: <String, dynamic>{
               'text': 'something',
               'selectionBase': 9,
-              'selectionExtent': 9
+              'selectionExtent': 9,
+              'composingBase': -1,
+              'composingExtent': -1
             }
           },
         ],
@@ -1631,6 +1704,8 @@ void testMain() {
             'text': 'something\nelse',
             'selectionBase': 14,
             'selectionExtent': 14,
+            'composingBase': -1,
+            'composingExtent': -1
           }
         ],
       );
@@ -1645,6 +1720,8 @@ void testMain() {
             'text': 'something\nelse',
             'selectionBase': 2,
             'selectionExtent': 5,
+            'composingBase': -1,
+            'composingExtent': -1
           }
         ],
       );

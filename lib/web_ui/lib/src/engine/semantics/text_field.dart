@@ -115,6 +115,7 @@ class SemanticsTextEditingStrategy extends DefaultTextEditingStrategy {
       subscriptions[i].cancel();
     }
     subscriptions.clear();
+    removeCompositionHandlers();
     lastEditingState = null;
 
     // If the text element still has focus, remove focus from the editable
@@ -139,6 +140,8 @@ class SemanticsTextEditingStrategy extends DefaultTextEditingStrategy {
     subscriptions.add(activeDomElement.onInput.listen(handleChange));
     subscriptions.add(activeDomElement.onKeyDown.listen(maybeSendAction));
     subscriptions.add(html.document.onSelectionChange.listen(handleChange));
+
+    addCompositionHandlers();
     preventDefaultForMouseEvents();
   }
 
